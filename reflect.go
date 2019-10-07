@@ -109,7 +109,7 @@ type Reflector struct {
 	TypeMapper func(reflect.Type) *Type
 
 	// Return field name and `required` flag
-	FieldNameReflector func(f reflect.StructField) (string, bool)
+	FieldNameReflector func(f reflect.StructField) (string, bool, bool)
 	// For custom logic mapping
 	FieldReflector func(f reflect.StructField, t *Type)
 }
@@ -500,7 +500,7 @@ func ignoredByJSONSchemaTags(tags []string) bool {
 	return tags[0] == "-"
 }
 
-func (r *Reflector) reflectFieldName(f reflect.StructField) (string, bool) {
+func (r *Reflector) reflectFieldName(f reflect.StructField) (string, bool, bool) {
 	if r.FieldNameReflector != nil {
 		return r.FieldNameReflector(f)
 	} else {
@@ -508,11 +508,7 @@ func (r *Reflector) reflectFieldName(f reflect.StructField) (string, bool) {
 	}
 }
 
-func defaultFieldNameReflector(f reflect.StructField, isRequiredFromJSONSchemaTags bool) (string, bool) {
-	if f.PkgPath != "" { // unexported field, ignore it
-		return "", false
-	}
-
+func defaultFieldNameReflector(f reflect.StructField, isRequiredFromJSONSchemaTags bool) (string, bool, bool) {
 	jsonTags, exist := f.Tag.Lookup("json")
 	if !exist {
 		jsonTags = f.Tag.Get("yaml")
