@@ -62,10 +62,11 @@ type Type struct {
 	Not                  *Type            `json:"not,omitempty"`                  // section 5.25
 	Definitions          Definitions      `json:"definitions,omitempty"`          // section 5.26
 	// RFC draft-wright-json-schema-validation-00, section 6, 7
-	Title       string      `json:"title,omitempty"`       // section 6.1
-	Description string      `json:"description,omitempty"` // section 6.1
-	Default     interface{} `json:"default,omitempty"`     // section 6.2
-	Format      string      `json:"format,omitempty"`      // section 7
+	Title       string        `json:"title,omitempty"`       // section 6.1
+	Description string        `json:"description,omitempty"` // section 6.1
+	Default     interface{}   `json:"default,omitempty"`     // section 6.2
+	Format      string        `json:"format,omitempty"`      // section 7
+	Examples    []interface{} `json:"examples,omitempty"`    // section 7.4
 	// RFC draft-wright-json-schema-hyperschema-00, section 4
 	Media          *Type  `json:"media,omitempty"`          // section 4.3
 	BinaryEncoding string `json:"binaryEncoding,omitempty"` // section 4.3
@@ -99,6 +100,13 @@ type Reflector struct {
 	// ExpandedStruct will cause the toplevel definitions of the schema not
 	// be referenced itself to a definition.
 	ExpandedStruct bool
+
+	// IgnoredTypes defines a slice of types that should be ignored in the schema,
+	// switching to just allowing additional properties instead.
+	IgnoredTypes []interface{}
+
+	// TypeMapper is a function that can be used to map custom Go types to jsconschema types.
+	TypeMapper func(reflect.Type) *Type
 
 	// Return field name and `required` flag
 	FieldNameReflector func(f reflect.StructField) (string, bool)
@@ -173,6 +181,12 @@ func (r *Reflector) reflectTypeToSchema(definitions Definitions, t reflect.Type)
 			{Type: "string"},
 			{Type: "integer"},
 		}}
+	}
+
+	if r.TypeMapper != nil {
+		if t := r.TypeMapper(t); t != nil {
+			return t
+		}
 	}
 
 	// Defined format types for JSON Schema Validation
@@ -251,6 +265,22 @@ func (r *Reflector) reflectTypeToSchema(definitions Definitions, t reflect.Type)
 
 // Refects a struct to a JSON Schema type.
 func (r *Reflector) reflectStruct(definitions Definitions, t reflect.Type) *Type {
+	for _, ignored := range r.IgnoredTypes {
+		if reflect.TypeOf(ignored) == t {
+			st := &Type{
+				Type:                 "object",
+				Properties:           map[string]*Type{},
+				AdditionalProperties: []byte("true"),
+			}
+			definitions[t.Name()] = st
+
+			return &Type{
+				Version: Version,
+				Ref:     "#/definitions/" + t.Name(),
+			}
+
+		}
+	}
 	st := &Type{
 		Type:                 "object",
 		Properties:           map[string]*Type{},
@@ -272,19 +302,21 @@ func (r *Reflector) reflectStructFields(st *Type, definitions Definitions, t ref
 	if t.Kind() == reflect.Ptr {
 		t = t.Elem()
 	}
+	if t.Kind() != reflect.Struct {
+		return
+	}
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
-		// anonymous and exported type should be processed recursively
+		name, exist, required := r.reflectFieldName(f)
+		// if anonymous and exported type should be processed recursively
 		// current type should inherit properties of anonymous one
-		if f.Anonymous && f.PkgPath == "" {
-			r.reflectStructFields(st, definitions, f.Type)
+		if name == "" {
+			if f.Anonymous && !exist {
+				r.reflectStructFields(st, definitions, f.Type)
+			}
 			continue
 		}
 
-		name, required := r.reflectFieldName(f)
-		if name == "" {
-			continue
-		}
 		property := r.reflectTypeToSchema(definitions, f.Type)
 		property.structKeywordsFromTags(f)
 		if r.FieldReflector != nil {
@@ -298,7 +330,9 @@ func (r *Reflector) reflectStructFields(st *Type, definitions Definitions, t ref
 }
 
 func (t *Type) structKeywordsFromTags(f reflect.StructField) {
+	t.Description = f.Tag.Get("jsonschema_description")
 	tags := strings.Split(f.Tag.Get("jsonschema"), ",")
+	t.genericKeywords(tags)
 	switch t.Type {
 	case "string":
 		t.stringKeywords(tags)
@@ -308,6 +342,22 @@ func (t *Type) structKeywordsFromTags(f reflect.StructField) {
 		t.numbericKeywords(tags)
 	case "array":
 		t.arrayKeywords(tags)
+	}
+}
+
+// read struct tags for generic keyworks
+func (t *Type) genericKeywords(tags []string) {
+	for _, tag := range tags {
+		nameValue := strings.Split(tag, "=")
+		if len(nameValue) == 2 {
+			name, val := nameValue[0], nameValue[1]
+			switch name {
+			case "title":
+				t.Title = val
+			case "description":
+				t.Description = val
+			}
+		}
 	}
 }
 
@@ -332,6 +382,10 @@ func (t *Type) stringKeywords(tags []string) {
 					t.Format = val
 					break
 				}
+			case "default":
+				t.Default = val
+			case "example":
+				t.Examples = append(t.Examples, val)
 			}
 		}
 	}
@@ -359,6 +413,13 @@ func (t *Type) numbericKeywords(tags []string) {
 			case "exclusiveMinimum":
 				b, _ := strconv.ParseBool(val)
 				t.ExclusiveMinimum = b
+			case "default":
+				i, _ := strconv.Atoi(val)
+				t.Default = i
+			case "example":
+				if i, err := strconv.Atoi(val); err == nil {
+					t.Examples = append(t.Examples, i)
+				}
 			}
 		}
 	}
@@ -382,6 +443,7 @@ func (t *Type) numbericKeywords(tags []string) {
 
 // read struct tags for array type keyworks
 func (t *Type) arrayKeywords(tags []string) {
+	var defaultValues []interface{}
 	for _, tag := range tags {
 		nameValue := strings.Split(tag, "=")
 		if len(nameValue) == 2 {
@@ -395,8 +457,13 @@ func (t *Type) arrayKeywords(tags []string) {
 				t.MaxItems = i
 			case "uniqueItems":
 				t.UniqueItems = true
+			case "default":
+				defaultValues = append(defaultValues, val)
 			}
 		}
+	}
+	if len(defaultValues) > 0 {
+		t.Default = defaultValues
 	}
 }
 
@@ -454,12 +521,12 @@ func defaultFieldNameReflector(f reflect.StructField, isRequiredFromJSONSchemaTa
 	jsonTagsList := strings.Split(jsonTags, ",")
 
 	if ignoredByJSONTags(jsonTagsList) {
-		return "", false
+		return "", exist, false
 	}
 
 	jsonSchemaTags := strings.Split(f.Tag.Get("jsonschema"), ",")
 	if ignoredByJSONSchemaTags(jsonSchemaTags) {
-		return "", false
+		return "", exist, false
 	}
 
 	name := f.Name
@@ -473,5 +540,15 @@ func defaultFieldNameReflector(f reflect.StructField, isRequiredFromJSONSchemaTa
 		name = jsonTagsList[0]
 	}
 
-	return name, required
+	// field not anonymous and not export has no export name
+	if !f.Anonymous && f.PkgPath != "" {
+		name = ""
+	}
+
+	// field anonymous but without json tag should be inherited by current type
+	if f.Anonymous && !exist {
+		name = ""
+	}
+
+	return name, exist, required
 }
